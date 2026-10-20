@@ -179,6 +179,21 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result.articles, ())
         self.assertEqual(result.diagnostics["raw_items"], 0)
 
+    def test_baidu_verification_stops_remaining_requests_and_is_not_zero_news(self):
+        baidu_requests = []
+        def fetch(url):
+            if urlsplit(url).hostname == "www.baidu.com":
+                baidu_requests.append(url)
+                return '<html><title>百度安全验证</title><body>请完成验证</body></html>'.encode()
+            return rss()
+        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=fetch)
+        self.assertFalse(result.complete)
+        self.assertEqual(len(baidu_requests), 1)
+        baidu_statuses = [status for status in result.statuses if status.name.startswith("baidu-")]
+        self.assertEqual(len(baidu_statuses), 4)
+        self.assertTrue(all(not status.ok and "security verification" in status.error for status in baidu_statuses))
+        self.assertEqual(result.diagnostics["successful_queries"], 8)
+
     def test_collection_deduplicates_overlapping_queries(self):
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: provider_fixture(url, rss(item("ICBC Cambodia signs agreement"))))
         self.assertTrue(result.complete)

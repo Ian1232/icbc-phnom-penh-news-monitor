@@ -189,11 +189,12 @@ def fetch_feed(url: str) -> bytes:
     for attempt in range(FETCH_ATTEMPTS):
         try:
             baidu = urlsplit(url).hostname == "www.baidu.com"
-            request = Request(url, headers={
-                "User-Agent": BAIDU_USER_AGENT if baidu else USER_AGENT,
-                "Accept": "text/html" if baidu else "application/rss+xml, application/xml;q=0.9",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7" if baidu else "en-US,en;q=0.9",
-            })
+            headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9"}
+            if baidu:
+                headers = {"User-Agent": BAIDU_USER_AGENT,
+                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                           "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7"}
+            request = Request(url, headers=headers)
             with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
                 _validate_feed_url(response.geturl())
                 data = response.read(MAX_FEED_BYTES + 1)
@@ -418,15 +419,23 @@ def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable
     queries = build_queries(target_date)
     fetch = fetcher or fetch_feed
     baidu_gate = threading.BoundedSemaphore(1)
+    baidu_verification_required = False
 
     def run(query: FeedQuery) -> tuple[list[Article], QueryStatus]:
+        nonlocal baidu_verification_required
         try:
             if query.provider == "baidu":
                 from .baidu import parse_baidu_news
                 # Keep the four daily Baidu requests sequential and low volume.
                 with baidu_gate:
-                    data = fetch(query.url)
-                return parse_baidu_news(data, query, target_date, observed_at=current)
+                    if baidu_verification_required:
+                        raise ValueError("Baidu security verification required; remaining queries skipped")
+                    try:
+                        return parse_baidu_news(fetch(query.url), query, target_date, observed_at=current)
+                    except ValueError as exc:
+                        if "security verification" in str(exc):
+                            baidu_verification_required = True
+                        raise
             return parse_google_news_rss(fetch(query.url), query, target_date)
         except Exception as exc:
             return [], QueryStatus(query.name, query.url, False, error=_error_text(exc))

@@ -1,0 +1,115 @@
+import argparse
+import contextlib
+from datetime import date, datetime, timezone
+import io
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from news_monitor import __main__ as app
+
+
+class AppTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.args = argparse.Namespace(test_message=False, force=False, dry_run=False,
+                                       state=str(Path(self.temp.name) / "state.json"),
+                                       output=str(Path(self.temp.name) / "reports"))
+        self.day = date(2026, 10, 19)
+
+    def result(self, health=(True, True), articles=None):
+        return SimpleNamespace(complete=all(health), target_date=self.day,
+                               articles=articles or [], statuses=[SimpleNamespace(ok=x) for x in health],
+                               diagnostics={"source_health": list(health)})
+
+    def run_silently(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return app.run_day(self.day, self.args)
+
+    def test_reporting_day_uses_phnom_penh_midnight(self):
+        # 17:00 UTC is midnight of the next local day.
+        self.assertEqual(app.reporting_date(datetime(2026, 10, 19, 16, 59, tzinfo=timezone.utc)), date(2026, 10, 18))
+        self.assertEqual(app.reporting_date(datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)), date(2026, 10, 19))
+
+    def test_split_preserves_every_content_character_and_utf16_limit(self):
+        text = "😀" * 3000 + "\n" + "链接 https://example.com/news\n" + "柬埔寨" * 1600
+        pieces = app.split_messages(text)
+        self.assertGreater(len(pieces), 2)
+        self.assertTrue(all(len(x.encode("utf-16-le")) // 2 <= 3500 for x in pieces))
+        # Trailing whitespace between chunks may be normalized, but no content lost.
+        self.assertEqual("".join(pieces).replace("\n", ""), text.replace("\n", ""))
+
+    def test_healthy_no_news_is_framed_as_search_result(self):
+        rendered = app.render(self.result())
+        self.assertIn("本次检索未发现", rendered)
+        self.assertIn("未收录内容可能遗漏", rendered)
+        self.assertNotIn("当天没有新闻", rendered)
+
+    def test_partial_no_news_explicitly_does_not_assert_absence(self):
+        rendered = app.render(self.result((True, False)))
+        self.assertIn("部分新闻源采集失败", rendered)
+        self.assertIn("不能据此认定当天没有新闻", rendered)
+
+    def test_all_sources_fail_sends_outage_and_never_finalizes_daily(self):
+        with patch.object(app, "collect", return_value=self.result((False, False))), patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 2)
+        kwargs = deliver.call_args.kwargs
+        self.assertTrue(kwargs["delivery_key"].startswith("outage:"))
+        self.assertNotEqual(kwargs["delivery_key"], "daily:2026-10-19")
+        self.assertIn("无法判断是否有新闻", deliver.call_args.args[0][0])
+
+    def test_partial_delivery_keeps_final_daily_key_available(self):
+        with patch.object(app, "collect", return_value=self.result((True, False))), patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 2)
+        self.assertEqual(deliver.call_args.kwargs["delivery_key"], "partial:daily:2026-10-19")
+
+    def test_healthy_digest_uses_final_daily_key(self):
+        with patch.object(app, "collect", return_value=self.result()), patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 0)
+        self.assertEqual(deliver.call_args.kwargs["delivery_key"], "daily:2026-10-19")
+
+    def test_dry_run_does_not_send_telegram(self):
+        self.args.dry_run = True
+        with patch.object(app, "collect", return_value=self.result()), patch.object(app, "deliver") as deliver:
+            self.assertEqual(self.run_silently(), 0)
+        deliver.assert_not_called()
+        self.assertFalse(Path(self.args.state).exists())
+
+    def test_completed_digest_reuses_frozen_content_without_recollecting(self):
+        ledger = {"version": 1, "deliveries": {"daily:2026-10-19": {"complete": True, "messages": ["frozen"]}}}
+        with patch.object(app, "load_state", return_value=ledger), patch.object(app, "collect") as collect, patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 0)
+        collect.assert_not_called()
+        self.assertEqual(deliver.call_args.args[0], ["frozen"])
+
+    def test_test_message_daily_key_is_isolated(self):
+        self.args.test_message = True
+        with patch.object(app, "collect", return_value=self.result()), patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 0)
+        self.assertEqual(deliver.call_args.kwargs["delivery_key"], "test:2026-10-19")
+        self.assertIn("【测试】", deliver.call_args.args[0][0])
+
+    def test_test_outage_uses_separate_key_and_label(self):
+        self.args.test_message = True
+        with patch.object(app, "collect", return_value=self.result((False, False))), patch.object(app, "deliver", return_value={}) as deliver:
+            self.assertEqual(self.run_silently(), 2)
+        self.assertEqual(deliver.call_args.kwargs["delivery_key"], "outage:test:2026-10-19")
+        self.assertIn("【测试】", deliver.call_args.args[0][0])
+
+    def test_catchup_respects_environment_start_date(self):
+        with patch.dict(os.environ, {"MONITOR_START_DATE": "2026-10-19"}), patch.object(app, "reporting_date", return_value=self.day), patch.object(app, "run_day", return_value=0) as run:
+            self.assertEqual(app.main(["--date", "2026-10-19", "--catch-up-days", "3"]), 0)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [self.day])
+
+    def test_catchup_runs_oldest_first_and_preserves_failure(self):
+        with patch.dict(os.environ, {"MONITOR_START_DATE": "2026-10-17"}), patch.object(app, "reporting_date", return_value=self.day), patch.object(app, "run_day", side_effect=[2, 0, 0]) as run:
+            self.assertEqual(app.main(["--date", "2026-10-19", "--catch-up-days", "3"]), 2)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [date(2026, 10, 17), date(2026, 10, 18), self.day])
+
+
+if __name__ == "__main__":
+    unittest.main()

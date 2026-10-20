@@ -1,0 +1,109 @@
+name: ICBC Phnom Penh daily news
+
+on:
+  schedule:
+    # ICT (Phnom Penh) is UTC+7. Primary 08:00; backup 08:37.
+    - cron: '0 1 * * *'
+    - cron: '37 1 * * *'
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: 'Optional completed news date YYYY-MM-DD (default yesterday in Phnom Penh)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Collect and render without sending Telegram'
+        default: false
+        type: boolean
+      test_message:
+        description: 'Send a labelled test; keep normal daily delivery state separate'
+        default: false
+        type: boolean
+      force:
+        description: 'Explicitly resend even if already delivered'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icbc-news-production
+  cancel-in-progress: false
+
+jobs:
+  news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE || '2026-10-19' }}
+      REPORT_DATE: ${{ inputs.report_date }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      TEST_MESSAGE: ${{ inputs.test_message }}
+      FORCE_SEND: ${{ inputs.force }}
+    steps:
+      - name: Check out monitor
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify monitor
+        run: python -m unittest discover -s tests -v
+
+      - name: Restore durable delivery ledger
+        shell: bash
+        run: |
+          mkdir -p state
+          git ls-remote --heads origin monitor-state > /tmp/icbc-state-ref
+          if [[ -s /tmp/icbc-state-ref ]]; then
+            git fetch --depth=1 origin monitor-state:refs/remotes/origin/monitor-state
+            git show origin/monitor-state:deliveries.json > /tmp/icbc-deliveries-restore.json
+            python -c 'import json; s=json.load(open("/tmp/icbc-deliveries-restore.json")); assert s.get("version")==1 and isinstance(s.get("deliveries"),dict)'
+            mv /tmp/icbc-deliveries-restore.json state/deliveries.json
+          fi
+
+      - name: Collect previous day's news and deliver Telegram digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+        shell: bash
+        run: |
+          args=(--catch-up-days 3)
+          if [[ -n "$REPORT_DATE" ]]; then args=(--date "$REPORT_DATE"); fi
+          if [[ "$DRY_RUN" == 'true' ]]; then args+=(--dry-run); fi
+          if [[ "$TEST_MESSAGE" == 'true' ]]; then args+=(--test-message); fi
+          if [[ "$FORCE_SEND" == 'true' ]]; then args+=(--force); fi
+          python -m news_monitor "${args[@]}"
+
+      - name: Save delivery ledger even after partial delivery
+        if: always() && inputs.dry_run != true
+        shell: bash
+        run: |
+          if [[ ! -f state/deliveries.json ]]; then exit 0; fi
+          python -c 'import json; s=json.load(open("state/deliveries.json")); assert s.get("version")==1 and isinstance(s.get("deliveries"),dict)'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          parent=()
+          if git rev-parse --verify refs/remotes/origin/monitor-state > /dev/null 2>&1; then
+            if git show origin/monitor-state:deliveries.json | cmp -s - state/deliveries.json; then exit 0; fi
+            parent=(-p refs/remotes/origin/monitor-state)
+          fi
+          blob=$(git hash-object -w state/deliveries.json)
+          tree=$(printf '100644 blob %s\tdeliveries.json\n' "$blob" | git mktree)
+          commit=$(git commit-tree "$tree" "${parent[@]}" -m "Record news delivery ${GITHUB_RUN_ID}")
+          git push origin "$commit:refs/heads/monitor-state"
+
+      - name: Save diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-report-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7

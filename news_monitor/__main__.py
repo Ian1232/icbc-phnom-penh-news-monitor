@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import json
 import os
@@ -78,7 +79,8 @@ def run_day(day, args):
     output.mkdir(parents=True, exist_ok=True)
     report = render(result, test=args.test_message)
     (output / f"{day}.txt").write_text(report + "\n", encoding="utf-8")
-    diagnostics = result.diagnostics
+    diagnostics = {**result.diagnostics, "queries": [asdict(status) for status in result.statuses],
+                   "items": [asdict(article) for article in result.articles]}
     (output / f"{day}.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"date": day.isoformat(), "articles": len(result.articles), "complete": result.complete,
                       "queries_ok": sum(s.ok for s in result.statuses), "queries_total": len(result.statuses)}))

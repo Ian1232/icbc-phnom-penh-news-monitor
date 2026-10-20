@@ -5,11 +5,11 @@ import io
 import os
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from news_monitor import __main__ as app
+from news_monitor.collector import Article, CollectionResult, QueryStatus
 
 
 class AppTests(unittest.TestCase):
@@ -22,9 +22,9 @@ class AppTests(unittest.TestCase):
         self.day = date(2026, 10, 19)
 
     def result(self, health=(True, True), articles=None):
-        return SimpleNamespace(complete=all(health), target_date=self.day,
-                               articles=articles or [], statuses=[SimpleNamespace(ok=x) for x in health],
-                               diagnostics={"source_health": list(health)})
+        return CollectionResult(self.day.isoformat(), tuple(articles or []),
+                                tuple(QueryStatus(f"source-{i}", "https://news.google.com/rss/search", ok)
+                                      for i, ok in enumerate(health)))
 
     def run_silently(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -53,6 +53,20 @@ class AppTests(unittest.TestCase):
         rendered = app.render(self.result((True, False)))
         self.assertIn("部分新闻源采集失败", rendered)
         self.assertIn("不能据此认定当天没有新闻", rendered)
+
+    def test_article_metadata_and_per_source_diagnostics_are_retained(self):
+        article = Article("ICBC Cambodia signs agreement", "https://example.com/news/1", "Example News",
+                          "2026-10-19T02:00:00+00:00", "A source-provided extract.")
+        result = self.result(articles=[article])
+        with patch.object(app, "collect", return_value=result), patch.object(app, "deliver", return_value={}):
+            self.assertEqual(self.run_silently(), 0)
+        rendered = (Path(self.args.output) / "2026-10-19.txt").read_text(encoding="utf-8")
+        self.assertIn("发布时间：09:00", rendered)
+        self.assertIn(article.title, rendered)
+        import json
+        diagnostics = json.loads((Path(self.args.output) / "2026-10-19.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(diagnostics["queries"]), 2)
+        self.assertEqual(diagnostics["items"][0]["url"], article.url)
 
     def test_all_sources_fail_sends_outage_and_never_finalizes_daily(self):
         with patch.object(app, "collect", return_value=self.result((False, False))), patch.object(app, "deliver", return_value={}) as deliver:

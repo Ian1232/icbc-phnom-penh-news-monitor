@@ -47,15 +47,21 @@ def render(result, *, test=False, complete=None):
     count = len(result.articles)
     prefix = "【测试】" if test else ""
     lines = [f"{prefix}工行金边分行｜每日新闻汇总", f"新闻日期：{result.target_date}（金边时间）",
+             "检索渠道：Google News、Bing News、百度资讯",
              f"监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名"]
     if not healthy:
         lines += ["⚠️ 部分新闻源采集失败，以下结果可能不完整。"]
+        failed = sorted({("百度资讯" if s.name.startswith("baidu-") else
+                          "Google News" if s.name.startswith("google-") else
+                          "Bing News" if s.name.startswith("bing-") else "其他来源")
+                         for s in result.statuses if not s.ok})
+        lines += ["未完成采集：" + "、".join(failed)]
     lines += [f"本次检索收录：{count} 条（已去重）", ""]
     if count == 0:
         lines += ["本次检索未发现符合日期和关联规则的新闻。" if healthy else
                   "已成功采集的来源中未发现符合条件的新闻；不能据此认定当天没有新闻。"]
     for index, article in enumerate(result.articles, 1):
-        stamp = datetime.fromisoformat(article.published_at).astimezone(ICT).strftime("%H:%M")
+        stamp = article.publication_note or datetime.fromisoformat(article.published_at).astimezone(ICT).strftime("%H:%M")
         lines += [f"{index}. {article.title}", f"来源：{article.source}｜发布时间：{stamp}"]
         if article.summary:
             lines += [f"来源摘要：{article.summary[:400]}"]

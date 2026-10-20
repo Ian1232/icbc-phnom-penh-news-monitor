@@ -1,4 +1,4 @@
-"""Bounded, read-only RSS collection with publication-date and relevance checks.
+"""Bounded, read-only news search with publication-date and relevance checks.
 
 Search feeds are indexes, not an exhaustive record of everything published online.
 The Google search window is deliberately wider than the reporting date; the final
@@ -16,6 +16,7 @@ from html import unescape
 from html.parser import HTMLParser
 import re
 import socket
+import threading
 import time
 import unicodedata
 from typing import Callable
@@ -29,8 +30,9 @@ MAX_FEED_BYTES = 2 * 1024 * 1024
 MAX_WORKERS = 6
 FETCH_TIMEOUT_SECONDS = 25
 FETCH_ATTEMPTS = 3
-ALLOWED_FEED_HOSTS = frozenset({"news.google.com", "www.bing.com"})
+ALLOWED_FEED_HOSTS = frozenset({"news.google.com", "www.bing.com", "www.baidu.com"})
 USER_AGENT = "ICBCPhnomPenhNewsMonitor/1.0 (public RSS; daily digest)"
+BAIDU_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class Article:
     published_at: str
     summary: str = ""
     query: str = ""
+    publication_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,23 +168,32 @@ def _validate_feed_url(url: str) -> None:
         or parsed.port not in {None, 443}
         or (parsed.hostname == "news.google.com" and parsed.path != "/rss/search")
         or (parsed.hostname == "www.bing.com" and parsed.path != "/news/search")
+        or (parsed.hostname == "www.baidu.com" and
+            (parsed.path != "/s" or dict(parse_qsl(parsed.query)).get("tn") != "news"))
     ):
-        raise ValueError("Feed URL is outside the approved HTTPS search feeds")
+        raise ValueError("Feed URL is outside the approved HTTPS news searches")
 
 
 class _FeedRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).hostname in {"wappass.baidu.com", "passport.baidu.com"}:
+            raise ValueError("Baidu returned a security verification page")
         _validate_feed_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def fetch_feed(url: str) -> bytes:
-    """Fetch only approved RSS search endpoints; retain normal TLS verification."""
+    """Fetch approved RSS/HTML news searches, retaining normal TLS verification."""
     _validate_feed_url(url)
     opener = build_opener(_FeedRedirects())
     for attempt in range(FETCH_ATTEMPTS):
         try:
-            request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9"})
+            baidu = urlsplit(url).hostname == "www.baidu.com"
+            request = Request(url, headers={
+                "User-Agent": BAIDU_USER_AGENT if baidu else USER_AGENT,
+                "Accept": "text/html" if baidu else "application/rss+xml, application/xml;q=0.9",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7" if baidu else "en-US,en;q=0.9",
+            })
             with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
                 _validate_feed_url(response.geturl())
                 data = response.read(MAX_FEED_BYTES + 1)
@@ -223,6 +235,17 @@ def build_queries(target_date: date) -> tuple[FeedQuery, ...]:
         ("bing-zh-branch", '工商银行 金边'),
     ):
         queries.append(FeedQuery(name, "https://www.bing.com/news/search?" + urlencode({"q": term, "format": "rss", "setlang": "en-US"}), "bing"))
+    # Baidu's public news results expose publication labels in the result cards.
+    # Never substitute search/crawl time for the article's publication time.
+    for name, term in (
+        ("baidu-zh-branch", '工商银行 金边'),
+        ("baidu-zh-cambodia", '工行 柬埔寨'),
+        ("baidu-zh-full-name", '"工商银行金边分行"'),
+        ("baidu-en-branch", '"ICBC" "Phnom Penh"'),
+    ):
+        queries.append(FeedQuery(name, "https://www.baidu.com/s?" + urlencode({
+            "tn": "news", "rtt": "4", "bsst": "1", "cl": "2", "ie": "utf-8", "wd": term,
+        }), "baidu"))
     return tuple(queries)
 
 
@@ -394,9 +417,16 @@ def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable
         raise ValueError("Only completed Phnom Penh calendar days can be collected")
     queries = build_queries(target_date)
     fetch = fetcher or fetch_feed
+    baidu_gate = threading.BoundedSemaphore(1)
 
     def run(query: FeedQuery) -> tuple[list[Article], QueryStatus]:
         try:
+            if query.provider == "baidu":
+                from .baidu import parse_baidu_news
+                # Keep the four daily Baidu requests sequential and low volume.
+                with baidu_gate:
+                    data = fetch(query.url)
+                return parse_baidu_news(data, query, target_date, observed_at=current)
             return parse_google_news_rss(fetch(query.url), query, target_date)
         except Exception as exc:
             return [], QueryStatus(query.name, query.url, False, error=_error_text(exc))

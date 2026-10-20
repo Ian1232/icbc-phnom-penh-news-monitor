@@ -54,6 +54,24 @@ class AppTests(unittest.TestCase):
         self.assertIn("部分新闻源采集失败", rendered)
         self.assertIn("不能据此认定当天没有新闻", rendered)
 
+    def test_baidu_failure_is_named_in_daily_report(self):
+        result = CollectionResult(self.day.isoformat(), (), (
+            QueryStatus("google-en-broad", "https://news.google.com/rss/search", True),
+            QueryStatus("baidu-zh-branch", "https://www.baidu.com/s?tn=news", False,
+                        error="Baidu security verification required"),
+        ))
+        rendered = app.render(result)
+        self.assertIn("检索渠道：Google News、Bing News、百度资讯", rendered)
+        self.assertIn("未完成采集：百度资讯", rendered)
+        self.assertIn("不能据此认定当天没有新闻", rendered)
+
+    def test_baidu_relative_time_is_displayed_as_source_label(self):
+        article = Article("工商银行金边分行签署协议", "https://example.com/a", "Example News",
+                          "2026-10-19T10:00:00+07:00", publication_note="百度标注：6小时前（相对时间）")
+        rendered = app.render(self.result(articles=[article]))
+        self.assertIn("发布时间：百度标注：6小时前（相对时间）", rendered)
+        self.assertNotIn("发布时间：10:00", rendered)
+
     def test_article_metadata_and_per_source_diagnostics_are_retained(self):
         article = Article("ICBC Cambodia signs agreement", "https://example.com/news/1", "Example News",
                           "2026-10-19T02:00:00+00:00", "A source-provided extract.")

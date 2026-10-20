@@ -31,6 +31,13 @@ def rss(*items):
     return ("<?xml version='1.0' encoding='utf-8'?><rss version='2.0'><channel><title>Fixture</title>" + "".join(items) + "</channel></rss>").encode()
 
 
+BAIDU_EMPTY = '<html><head><title>百度资讯搜索</title></head><body><div id="noresult">抱歉，没有找到相关结果</div></body></html>'.encode()
+
+
+def provider_fixture(url, rss_data=None):
+    return BAIDU_EMPTY if urlsplit(url).hostname == "www.baidu.com" else (rss_data if rss_data is not None else rss())
+
+
 class CollectorTests(unittest.TestCase):
     def test_previous_day_is_based_on_phnom_penh_publication_timestamp(self):
         data = rss(
@@ -149,28 +156,31 @@ class CollectorTests(unittest.TestCase):
                 self.assertIn("after:2026-10-18", term)
                 self.assertIn("before:2026-10-21", term)
         self.assertTrue(any("zh-CN" in query.url for query in queries))
+        self.assertEqual(sum(query.provider == "baidu" for query in queries), 4)
 
     def test_valid_empty_feed_is_different_from_failed_source(self):
         fixtures = {
             "google": rss(),
             "bing": b"<html>temporary block</html>",
         }
-        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: fixtures["google" if "google.com" in url else "bing"])
+        def fetch(url):
+            return BAIDU_EMPTY if "baidu.com" in url else fixtures["google" if "google.com" in url else "bing"]
+        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=fetch)
         self.assertFalse(result.complete)
         self.assertEqual(result.articles, ())
-        self.assertEqual(result.diagnostics["successful_queries"], 5)
+        self.assertEqual(result.diagnostics["successful_queries"], 9)
         self.assertEqual(result.diagnostics["failed_queries"], 3)
         self.assertTrue(all(status.ok for status in result.statuses[:5]))
-        self.assertIn("not an RSS", result.statuses[-1].error)
+        self.assertIn("not an RSS", next(status.error for status in result.statuses if status.name == "bing-en-broad"))
 
     def test_all_empty_success_is_complete(self):
-        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: rss())
+        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=provider_fixture)
         self.assertTrue(result.complete)
         self.assertEqual(result.articles, ())
         self.assertEqual(result.diagnostics["raw_items"], 0)
 
     def test_collection_deduplicates_overlapping_queries(self):
-        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: rss(item("ICBC Cambodia signs agreement")))
+        result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: provider_fixture(url, rss(item("ICBC Cambodia signs agreement"))))
         self.assertTrue(result.complete)
         self.assertEqual(len(result.articles), 1)
         self.assertEqual(result.diagnostics["on_date_items_before_dedup"], 8)
@@ -188,6 +198,9 @@ class CollectorTests(unittest.TestCase):
             "https://news.google.com:444/rss/search?q=ICBC",
             "https://news.google.com/other",
             "https://user:secret@news.google.com/rss/search?q=ICBC",
+            "https://www.baidu.com/s?tn=web&wd=ICBC",
+            "https://www.baidu.com/link?url=ICBC",
+            "https://wappass.baidu.com/static/captcha/tuxing.html",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 _validate_feed_url(url)

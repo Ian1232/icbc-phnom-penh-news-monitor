@@ -106,6 +106,10 @@ def run_day(day, args):
 
 
 def main(argv=None):
+    # Windows redirected consoles may default to a legacy encoding.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", type=date.fromisoformat, help="Reporting date YYYY-MM-DD; default yesterday ICT")
     parser.add_argument("--dry-run", action="store_true", help="Collect and render without Telegram or delivery state writes")

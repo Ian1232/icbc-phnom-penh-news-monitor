@@ -2,6 +2,7 @@ import argparse
 import contextlib
 from datetime import date, datetime, timezone
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -20,6 +21,11 @@ class AppTests(unittest.TestCase):
                                        state=str(Path(self.temp.name) / "state.json"),
                                        output=str(Path(self.temp.name) / "reports"))
         self.day = date(2026, 10, 19)
+        # Unit fixtures must never append fake news/statuses to the real CI job
+        # summary, nor emit GitHub warning annotations for synthetic failures.
+        environment = patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def result(self, health=(True, True), articles=None):
         return CollectionResult(self.day.isoformat(), tuple(articles or []),
@@ -96,8 +102,53 @@ class AppTests(unittest.TestCase):
 
     def test_partial_delivery_keeps_final_daily_key_available(self):
         with patch.object(app, "collect", return_value=self.result((True, False))), patch.object(app, "deliver", return_value={}) as deliver:
-            self.assertEqual(self.run_silently(), 2)
+            self.assertEqual(self.run_silently(), 0)
         self.assertEqual(deliver.call_args.kwargs["delivery_key"], "partial:daily:2026-10-19")
+        self.assertEqual(deliver.call_count, 1)
+        sent = "\n".join(deliver.call_args.args[0])
+        self.assertIn("部分新闻源采集失败", sent)
+        self.assertIn("已确认关联：0 条", sent)
+        self.assertIn("不能据此认定当天没有新闻", sent)
+
+    def test_partial_delivery_preserves_articles_and_incomplete_coverage_status(self):
+        article = Article("工商银行金边分行参与经贸交流", "https://publisher.example.org/news", "Example News",
+                          "2026-10-19T13:00:00+07:00", "中国工商银行金边分行代表参加当地经贸交流活动。")
+        result = self.result((True, False), [article])
+        with patch.object(app, "collect", return_value=result), patch.object(app, "deliver", return_value={"sent_messages": 1, "skipped_messages": 0}) as deliver, contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(app.run_day(self.day, self.args), 0)
+        self.assertEqual(deliver.call_count, 1)
+        sent = "\n".join(deliver.call_args.args[0])
+        self.assertIn(article.title, sent)
+        self.assertIn(article.url, sent)
+        self.assertIn("已确认关联：1 条", sent)
+        self.assertIn("部分新闻源采集失败", sent)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.startswith("{")]
+        self.assertFalse(events[0]["complete"])
+        self.assertEqual(events[-1]["coverage"], "partial")
+        self.assertTrue(events[-1]["degraded"])
+        diagnostics = json.loads((Path(self.args.output) / "2026-10-19.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostics["successful_queries"], 1)
+        self.assertEqual(diagnostics["failed_queries"], 1)
+        self.assertEqual(diagnostics["items"][0]["url"], article.url)
+
+    def test_partial_success_summary_distinguishes_coverage_and_deduplicated_delivery(self):
+        result = CollectionResult(self.day.isoformat(), (), (
+            QueryStatus("google-en-broad", "https://news.google.com/rss/search", True),
+            QueryStatus("bing-en-broad", "https://www.bing.com/news/search", True),
+            QueryStatus("baidu-zh-branch", "https://www.baidu.com/s?tn=news", False,
+                        error="Baidu security verification required"),
+        ))
+        summary = Path(self.temp.name) / "github-summary.md"
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_ACTIONS": "true"}), patch.object(app, "collect", return_value=result), patch.object(app, "deliver", return_value={"sent_messages": 0, "skipped_messages": 2}), contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(app.run_day(self.day, self.args), 0)
+        rendered = summary.read_text(encoding="utf-8")
+        self.assertIn("部分检索不可用", rendered)
+        self.assertIn("2/3 路检索完成", rendered)
+        self.assertIn("百度资讯：0/1", rendered)
+        self.assertIn("本次发送 0 条", rendered)
+        self.assertIn("已送达而跳过 2 条", rendered)
+        self.assertIn("不能视为完整覆盖", rendered)
+        self.assertIn("::warning", stdout.getvalue())
 
     def test_healthy_digest_uses_final_daily_key(self):
         with patch.object(app, "collect", return_value=self.result()), patch.object(app, "deliver", return_value={}) as deliver:
@@ -109,6 +160,40 @@ class AppTests(unittest.TestCase):
         with patch.object(app, "collect", return_value=self.result()), patch.object(app, "deliver") as deliver:
             self.assertEqual(self.run_silently(), 0)
         deliver.assert_not_called()
+        self.assertFalse(Path(self.args.state).exists())
+
+    def test_dry_run_partial_is_usable_but_all_source_outage_is_failure(self):
+        self.args.dry_run = True
+        for health, code, coverage in (((True, False), 0, "partial"), ((False, False), 2, "unavailable")):
+            with self.subTest(health=health), patch.object(app, "collect", return_value=self.result(health)), patch.object(app, "deliver") as deliver, contextlib.redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(app.run_day(self.day, self.args), code)
+            deliver.assert_not_called()
+            self.assertFalse(Path(self.args.state).exists())
+            self.assertIn("不能据此认定当天没有新闻", stdout.getvalue())
+            events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.startswith("{")]
+            self.assertFalse(events[0]["complete"])
+            self.assertEqual(events[-1]["coverage"], coverage)
+
+    def test_telegram_failure_keeps_main_failed_even_with_available_sources(self):
+        for health in ((True, True), (True, False)):
+            with self.subTest(health=health), patch.object(app, "collect", return_value=self.result(health)), patch.object(app, "deliver", side_effect=app.DeliveryError("safe transport failure")) as deliver, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+                code = app.main(["--date", self.day.isoformat(), "--state", self.args.state, "--output", self.args.output])
+            self.assertEqual(code, 2)
+            self.assertEqual(deliver.call_count, 1)
+            self.assertIn("DeliveryError", stderr.getvalue())
+
+    def test_invalid_ledger_keeps_main_failed_before_collecting_or_sending(self):
+        Path(self.args.state).write_text('{"version":0,"deliveries":{}}', encoding="utf-8")
+        with patch.object(app, "collect") as collect, patch.object(app, "deliver") as deliver, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = app.main(["--date", self.day.isoformat(), "--state", self.args.state, "--output", self.args.output])
+        self.assertEqual(code, 2)
+        collect.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_missing_telegram_configuration_is_still_failure_after_partial_collection(self):
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "", "TELEGRAM_CHAT_IDS": ""}), patch.object(app, "collect", return_value=self.result((True, False))), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = app.main(["--date", self.day.isoformat(), "--state", self.args.state, "--output", self.args.output])
+        self.assertEqual(code, 2)
         self.assertFalse(Path(self.args.state).exists())
 
     def test_completed_digest_reuses_frozen_content_without_recollecting(self):

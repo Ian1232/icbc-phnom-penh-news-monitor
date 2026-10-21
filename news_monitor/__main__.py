@@ -80,6 +80,36 @@ def render(result, *, test=False, complete=None):
     return "\n".join(lines)
 
 
+def write_run_summary(result, *, delivery=None, dry_run=False):
+    """Report source coverage independently from the success of execution/delivery."""
+    healthy = sum(status.ok for status in result.statuses)
+    total = len(result.statuses)
+    degraded = healthy > 0 and not result.complete
+    coverage = "配置的检索均完成" if result.complete else "部分检索不可用" if healthy else "全部检索不可用"
+    lines = [f"### 工行金边分行新闻：{result.target_date}",
+             f"检索状态：{coverage}（{healthy}/{total} 路检索完成）",
+             f"已确认关联：{sum(a.relevance == 'confirmed' for a in result.articles)} 条；"
+             f"待核实：{sum(a.relevance == 'candidate' for a in result.articles)} 条。"]
+    for provider, label in (("google", "Google News"), ("bing", "Bing News"), ("baidu", "百度资讯")):
+        queries = [status for status in result.statuses if status.name.startswith(provider + "-")]
+        if queries:
+            lines.append(f"- {label}：{sum(status.ok for status in queries)}/{len(queries)} 路检索完成")
+    if dry_run:
+        lines.append("本次为预览，未发送 Telegram，也未修改送达记录。")
+    elif delivery is not None:
+        lines.append(f"Telegram：本次发送 {delivery.get('sent_messages', 0)} 条；"
+                     f"已送达而跳过 {delivery.get('skipped_messages', 0)} 条。")
+    if not result.complete:
+        lines.append("未完成的检索仍在日报和诊断报告中标注；本次结果不能视为完整覆盖。")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if summary_path:
+        with Path(summary_path).open("a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n\n")
+    if degraded and os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=部分新闻检索不可用::{result.target_date}：{healthy}/{total} 路检索完成。详见任务摘要及日报警告。")
+    return {"degraded": degraded, "coverage": "complete" if result.complete else "partial" if healthy else "unavailable"}
+
+
 def run_day(day, args):
     key = ("test:" if args.test_message else "daily:") + day.isoformat()
     state = load_state(args.state)
@@ -105,14 +135,17 @@ def run_day(day, args):
     (output / f"{day}.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"date": day.isoformat(), "articles": len(result.articles), "complete": result.complete,
                       "queries_ok": sum(s.ok for s in result.statuses), "queries_total": len(result.statuses)}))
+    healthy = sum(status.ok for status in result.statuses)
     if args.dry_run:
         print(report)
-        return 0 if result.complete else 2
-    healthy = sum(status.ok for status in result.statuses)
+        coverage = write_run_summary(result, dry_run=True)
+        print(json.dumps({"date": day.isoformat(), "dry_run": True, **coverage}))
+        return 0 if healthy else 2
     if healthy == 0:
         warning = (("【测试】" if args.test_message else "") + f"工行金边分行新闻监测失败\n新闻日期：{day}\n所有新闻检索源均采集失败，无法判断是否有新闻。"
                    "\n系统会在后续运行重试，请查看 GitHub Actions。")
         status = deliver([warning], delivery_key=f"outage:{key}", state_path=args.state)
+        write_run_summary(result, delivery=status)
         print(json.dumps({"source_outage": True, **status}))
         return 2
     if not result.complete:
@@ -122,8 +155,9 @@ def run_day(day, args):
                          force=args.force)
     else:
         status = deliver(split_messages(report), delivery_key=key, state_path=args.state, force=args.force)
-    print(json.dumps({"date": day.isoformat(), **status}))
-    return 0 if result.complete else 2
+    coverage = write_run_summary(result, delivery=status)
+    print(json.dumps({"date": day.isoformat(), **coverage, **status}))
+    return 0
 
 
 def main(argv=None):

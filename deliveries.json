@@ -22,6 +22,17 @@
       "messages": [
         "工行金边分行｜每日新闻汇总\n新闻日期：2026-10-19（金边时间）\n监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名\n本次检索收录：0 条（已去重）\n\n本次检索未发现符合日期和关联规则的新闻。\n说明：按新闻源标注的发布时间筛选；保留原文标题与链接。免费检索有收录及发布时间误差，未收录内容可能遗漏。"
       ]
+    },
+    "partial:test:2026-09-21": {
+      "recipients": {
+        "1b9820a6ca15c96defe3b3b2": [
+          0
+        ]
+      },
+      "complete": true,
+      "messages": [
+        "【测试】工行金边分行｜每日新闻汇总\n新闻日期：2026-09-21（金边时间）\n检索渠道：Google News、Bing News、百度资讯\n监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名\n⚠️ 部分新闻源采集失败，以下结果可能不完整。\n未完成采集：百度资讯\n已确认关联：0 条；关联待核实：1 条（已去重）\n\n【关联待核实】\n以下为精确分行名称检索命中，正文暂未核验，不计入已确认新闻。\n1. 东盟头条：柬埔寨川渝总商会700余人共庆中国国庆节和中秋节\n来源：www.hkcna.hk\n核验情况：精确分行名称检索命中；正文未能核验，关联性待确认\nhttps://news.google.com/rss/articles/CBMib0FVX3lxTE54dmJqYVgxaURtMEZRYVF3ZjlraHV3WHBUZ19Cd2Q2Wm5Ea2VoOWpfV2FRWDA1dlFCdDZZaE5CSGNoMUt0WkpnYVpZY2l1SXczM2diTUZGbEk1Zy1PamZnN092bm5LbTBrZE9iRTRxRQ?oc=5\n\n说明：按新闻源标注的发布时间筛选；保留原文标题与链接。免费检索有收录及发布时间误差，未收录内容可能遗漏。"
+      ]
     }
   }
 }

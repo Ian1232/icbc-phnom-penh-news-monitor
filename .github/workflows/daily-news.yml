@@ -11,6 +11,10 @@ on:
         description: 'Optional completed news date YYYY-MM-DD (default yesterday in Phnom Penh)'
         required: false
         type: string
+      supplement_id:
+        description: 'Optional archived user-submitted news ID; deliver a separate historical supplement'
+        required: false
+        type: string
       dry_run:
         description: 'Collect and render without sending Telegram'
         default: false
@@ -44,6 +48,7 @@ jobs:
     env:
       MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE || '2026-10-19' }}
       REPORT_DATE: ${{ inputs.report_date }}
+      SUPPLEMENT_ID: ${{ inputs.supplement_id }}
       DRY_RUN: ${{ inputs.dry_run }}
       TEST_MESSAGE: ${{ inputs.test_message }}
       METADATA_ONLY: ${{ inputs.metadata_only }}
@@ -79,6 +84,17 @@ jobs:
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         shell: bash
         run: |
+          if [[ -n "$SUPPLEMENT_ID" ]]; then
+            if [[ -n "$REPORT_DATE" || "$TEST_MESSAGE" == 'true' || "$METADATA_ONLY" == 'true' ]]; then
+              echo 'Historical supplements must be selected separately from dated/test/index-only reports.' >&2
+              exit 64
+            fi
+            args=(--id "$SUPPLEMENT_ID")
+            if [[ "$DRY_RUN" == 'true' ]]; then args+=(--dry-run); fi
+            if [[ "$FORCE_SEND" == 'true' ]]; then args+=(--force); fi
+            python -m news_monitor.supplement "${args[@]}"
+            exit 0
+          fi
           args=(--catch-up-days 3)
           if [[ -n "$REPORT_DATE" ]]; then args=(--date "$REPORT_DATE"); fi
           if [[ "$DRY_RUN" == 'true' ]]; then args+=(--dry-run); fi

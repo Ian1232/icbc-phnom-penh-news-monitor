@@ -66,6 +66,17 @@
       "messages": [
         "【测试】工行金边分行｜每日新闻汇总\n新闻日期：2026-09-20（金边时间）\n检索渠道：Google News、Bing News、百度资讯\n监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名\n⚠️ 部分新闻源采集失败，以下结果可能不完整。\n未完成采集：百度资讯\n已确认关联：0 条；关联待核实：2 条（已去重）\n\n【关联待核实】\n以下为精确分行名称检索命中，正文暂未核验，不计入已确认新闻。\n1. 政企同心·共筑未来｜2026柬埔寨川渝总商会投资发展政企座谈会圆满召开\n来源：东盟头条\n核验情况：精确分行名称检索命中；正文未能核验，关联性待确认\nhttps://news.google.com/rss/articles/CBMiS0FVX3lxTFBqR3JpZzZSNTFWZm8tSVhKeFE0UEI5OFVLRFowdlV4Z052OENyZ1ZtNFAtTFh2WUUwbGN5SEV5UUNaeGI2UzV5eXk3WQ?oc=5\n\n2. 柬埔寨川渝总商会成功举办2026年\"迎国庆·庆中秋\"联欢晚宴\n来源：东盟头条\n核验情况：精确分行名称检索命中；正文未能核验，关联性待确认\nhttps://news.google.com/rss/articles/CBMiS0FVX3lxTE1pRXB1WXBxVkhIODlnLU5ESEE1ek5GZXhxamNzbGJoSXdlNGd6cC1oYThvX0o1V1dfZFpoN2dFR0FIRVl1Zlo0SDFlUQ?oc=5\n\n说明：按新闻源标注的发布时间筛选；保留原文标题与链接。免费检索有收录及发布时间误差，未收录内容可能遗漏。"
       ]
+    },
+    "partial:test:2024-12-18": {
+      "recipients": {
+        "1b9820a6ca15c96defe3b3b2": [
+          0
+        ]
+      },
+      "complete": true,
+      "messages": [
+        "【测试】工行金边分行｜每日新闻汇总\n新闻日期：2024-12-18（金边时间）\n检索渠道：Google News、Bing News、百度资讯\n监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名\n⚠️ 部分新闻源采集失败，以下结果可能不完整。\n未完成采集：百度资讯\n已确认关联：0 条；关联待核实：1 条（已去重）\n\n【关联待核实】\n以下为精确分行名称检索命中，正文暂未核验，不计入已确认新闻。\n1. 柬埔寨中国商会圆满完成第十届理事会换届选举\n来源：柬华日报\n核验情况：精确分行名称检索命中；正文未能核验，关联性待确认\nhttps://news.google.com/rss/articles/CBMiV0FVX3lxTE4zWXJRYWtKOE05cjN3T1JlUkV1S25MVTJ5S21RQzNCM2U1QVpvNjRhZEsySmpna1pkMXJRMU91ZHlqMGRCNXVpeklQMzRrdTc1ZWo3dHc5OA?oc=5\n\n说明：按新闻源标注的发布时间筛选；保留原文标题与链接。免费检索有收录及发布时间误差，未收录内容可能遗漏。"
+      ]
     }
   }
 }

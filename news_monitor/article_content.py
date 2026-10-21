@@ -125,17 +125,20 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host: str, address: str, timeout: float):
         super().__init__(host, 443, timeout=timeout, context=ssl.create_default_context())
         self._public_address = address
+        self._connection_deadline = time.monotonic() + timeout
 
     def connect(self):
         # Connect directly to the prevalidated numeric address. DNS is not
         # resolved a second time; TLS still verifies the publisher hostname.
         family = socket.AF_INET6 if ":" in self._public_address else socket.AF_INET
         raw = socket.socket(family, socket.SOCK_STREAM)
-        raw.settimeout(self.timeout)
+        raw.settimeout(_remaining(self._connection_deadline))
         try:
             address = (self._public_address, 443, 0, 0) if family == socket.AF_INET6 else (self._public_address, 443)
             raw.connect(address)
+            raw.settimeout(_remaining(self._connection_deadline))
             self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            self.sock.settimeout(_remaining(self._connection_deadline))
         except Exception:
             raw.close()
             raise
@@ -212,7 +215,7 @@ _BODY_IDENTIFIERS = frozenset({
     "story-body", "story-content", "rich_media_content", "entry-content", "post-content",
     "articletext", "artibody", "trs_editor", "ue_context",
 })
-_EXCLUDED_PART = re.compile(r"(?:^|[-_\s])(?:related|recommend(?:ed|ations)?|sidebar|share|advert(?:isement)?|menu|footer|header|nav|comments?|copyright|breadcrumb|byline|author|pubtime)(?:$|[-_\s])", re.I)
+_EXCLUDED_PART = re.compile(r"(?:^|[-_\s])(?:related|recommend(?:ed|ation|ations)?|sidebar|share|advert(?:isement)?|menu|footer|header|nav|comments?|copyright|breadcrumb|byline|author|pubtime)(?:$|[-_\s])", re.I)
 _RELATED_HEADING = re.compile(r"^(?:related(?:\s+(?:news|articles?|stories))?|recommended|you may also like|read more|相关新闻|相关阅读|相关推荐|延伸阅读|热门推荐|相关文章)", re.I)
 
 
@@ -271,6 +274,7 @@ def _raw_text(node: _Node) -> str:
 
 def _excluded(node: _Node) -> bool:
     identifiers = node.attrs.get("id", "") + " " + node.attrs.get("class", "")
+    identifiers = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", identifiers)
     return (node.tag in _SKIP_TAGS or bool(_EXCLUDED_PART.search(identifiers))
             or node.attrs.get("aria-hidden", "").lower() == "true" or "hidden" in node.attrs
             or node.attrs.get("role", "").lower() in {"navigation", "complementary", "banner"})

@@ -200,7 +200,8 @@ def parse_baidu_news(data: bytes, query: "FeedQuery", target_date: date, *, obse
         if not fields["title"]:
             malformed_count += 1
             continue
-        if not is_relevant(fields["title"], fields["summary"]):
+        metadata_match = is_relevant(fields["title"], fields["summary"])
+        if not metadata_match and not query.exact_branch:
             continue
         relevant_count += 1
         bounds = baidu_datetime_bounds(fields["date"], observed_at=observed_at)
@@ -230,7 +231,11 @@ def parse_baidu_news(data: bytes, query: "FeedQuery", target_date: date, *, obse
         if (fields["title"], url) in seen:
             continue
         seen.add((fields["title"], url))
-        articles.append(Article(fields["title"], url, fields["source"] or "百度资讯检索", published.isoformat(), fields["summary"][:1600], query.name, publication_note))
+        articles.append(Article(fields["title"], url, fields["source"] or "百度资讯检索", published.isoformat(),
+                                fields["summary"][:1600], query.name, publication_note,
+                                relevance="confirmed" if metadata_match else "candidate",
+                                evidence="title_or_summary" if metadata_match else "exact_branch_query",
+                                review_reason="" if metadata_match else "精确分行名称检索命中，正文尚未核验"))
     errors = []
     if malformed_count:
         errors.append(f"{malformed_count} Baidu result card(s) could not be parsed")

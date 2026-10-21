@@ -134,8 +134,13 @@ class AppTests(unittest.TestCase):
 
     def test_catchup_respects_environment_start_date(self):
         with patch.dict(os.environ, {"MONITOR_START_DATE": "2026-10-19"}), patch.object(app, "reporting_date", return_value=self.day), patch.object(app, "run_day", return_value=0) as run:
-            self.assertEqual(app.main(["--date", "2026-10-19", "--catch-up-days", "3"]), 0)
+            self.assertEqual(app.main(["--catch-up-days", "3"]), 0)
         self.assertEqual([call.args[0] for call in run.call_args_list], [self.day])
+
+    def test_explicit_historical_replay_is_not_silently_skipped_by_start_date(self):
+        with patch.dict(os.environ, {"MONITOR_START_DATE": "2026-10-19"}), patch.object(app, "reporting_date", return_value=self.day), patch.object(app, "run_day", return_value=0) as run:
+            self.assertEqual(app.main(["--date", "2026-09-21", "--dry-run"]), 0)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [date(2026, 9, 21)])
 
     def test_catchup_runs_oldest_first_and_preserves_failure(self):
         with patch.dict(os.environ, {"MONITOR_START_DATE": "2026-10-17"}), patch.object(app, "reporting_date", return_value=self.day), patch.object(app, "run_day", side_effect=[2, 0, 0]) as run:

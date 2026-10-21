@@ -44,7 +44,9 @@ def split_messages(text, limit=3500):
 
 def render(result, *, test=False, complete=None):
     healthy = result.complete if complete is None else complete
-    count = len(result.articles)
+    confirmed = [article for article in result.articles if article.relevance == "confirmed"]
+    candidates = [article for article in result.articles if article.relevance == "candidate"]
+    count = len(confirmed)
     prefix = "【测试】" if test else ""
     lines = [f"{prefix}工行金边分行｜每日新闻汇总", f"新闻日期：{result.target_date}（金边时间）",
              "检索渠道：Google News、Bing News、百度资讯",
@@ -56,16 +58,24 @@ def render(result, *, test=False, complete=None):
                           "Bing News" if s.name.startswith("bing-") else "其他来源")
                          for s in result.statuses if not s.ok})
         lines += ["未完成采集：" + "、".join(failed)]
-    lines += [f"本次检索收录：{count} 条（已去重）", ""]
-    if count == 0:
+    lines += [f"已确认关联：{count} 条；关联待核实：{len(candidates)} 条（已去重）", ""]
+    if count == 0 and not candidates:
         lines += ["本次检索未发现符合日期和关联规则的新闻。" if healthy else
                   "已成功采集的来源中未发现符合条件的新闻；不能据此认定当天没有新闻。"]
-    for index, article in enumerate(result.articles, 1):
+    if confirmed:
+        lines += ["【已确认关联】"]
+    for index, article in enumerate(confirmed, 1):
         stamp = article.publication_note or datetime.fromisoformat(article.published_at).astimezone(ICT).strftime("%H:%M")
         lines += [f"{index}. {article.title}", f"来源：{article.source}｜发布时间：{stamp}"]
         if article.summary:
-            lines += [f"来源摘要：{article.summary[:400]}"]
+            label = "正文关联摘录" if article.evidence == "article_body" else "来源摘要"
+            lines += [f"{label}：{article.summary[:400]}"]
         lines += [article.url, ""]
+    if candidates:
+        lines += ["【关联待核实】", "以下为精确分行名称检索命中，正文暂未核验，不计入已确认新闻。"]
+        for index, article in enumerate(candidates, 1):
+            lines += [f"{index}. {article.title}", f"来源：{article.source}",
+                      f"核验情况：{article.review_reason}", article.url, ""]
     lines += ["说明：按新闻源标注的发布时间筛选；保留原文标题与链接。免费检索有收录及发布时间误差，未收录内容可能遗漏。"]
     return "\n".join(lines)
 
@@ -80,13 +90,18 @@ def run_day(day, args):
         result = deliver(record["messages"], delivery_key=key, state_path=args.state)
         print(json.dumps({"date": day.isoformat(), "previously_completed": True, **result}))
         return 0
-    result = collect(day)
+    if getattr(args, "metadata_only", False):
+        from .article_content import ContentEvidence
+        result = collect(day, body_inspector=lambda url: ContentEvidence(
+            False, False, error="Body inspection disabled for this metadata-only check"))
+    else:
+        result = collect(day)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     report = render(result, test=args.test_message)
     (output / f"{day}.txt").write_text(report + "\n", encoding="utf-8")
     diagnostics = {**result.diagnostics, "queries": [asdict(status) for status in result.statuses],
-                   "items": [asdict(article) for article in result.articles]}
+                   "items": [asdict(article) for article in result.articles], "body_checks": list(result.body_checks)}
     (output / f"{day}.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"date": day.isoformat(), "articles": len(result.articles), "complete": result.complete,
                       "queries_ok": sum(s.ok for s in result.statuses), "queries_total": len(result.statuses)}))
@@ -120,6 +135,7 @@ def main(argv=None):
     parser.add_argument("--date", type=date.fromisoformat, help="Reporting date YYYY-MM-DD; default yesterday ICT")
     parser.add_argument("--dry-run", action="store_true", help="Collect and render without Telegram or delivery state writes")
     parser.add_argument("--test-message", action="store_true", help="Send a labelled test using a separate ledger")
+    parser.add_argument("--metadata-only", action="store_true", help="Check indexes without fetching publisher article bodies")
     parser.add_argument("--force", action="store_true", help="Explicitly resend a previously delivered report")
     parser.add_argument("--catch-up-days", type=int, choices=range(1, 8), default=1)
     parser.add_argument("--start-date", type=date.fromisoformat, default=os.environ.get("MONITOR_START_DATE"),
@@ -132,7 +148,7 @@ def main(argv=None):
         parser.error("Daily reports only cover completed Phnom Penh calendar days")
     exit_code = 0
     for offset in reversed(range(args.catch_up_days)):
-        if args.start_date and day - timedelta(days=offset) < args.start_date:
+        if not args.date and args.start_date and day - timedelta(days=offset) < args.start_date:
             continue
         try:
             exit_code = max(exit_code, run_day(day - timedelta(days=offset), args))

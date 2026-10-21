@@ -168,7 +168,7 @@ class CollectorTests(unittest.TestCase):
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=fetch)
         self.assertFalse(result.complete)
         self.assertEqual(result.articles, ())
-        self.assertEqual(result.diagnostics["successful_queries"], 9)
+        self.assertEqual(result.diagnostics["successful_queries"], 11)
         self.assertEqual(result.diagnostics["failed_queries"], 3)
         self.assertTrue(all(status.ok for status in result.statuses[:5]))
         self.assertIn("not an RSS", next(status.error for status in result.statuses if status.name == "bing-en-broad"))
@@ -192,13 +192,13 @@ class CollectorTests(unittest.TestCase):
         baidu_statuses = [status for status in result.statuses if status.name.startswith("baidu-")]
         self.assertEqual(len(baidu_statuses), 4)
         self.assertTrue(all(not status.ok and "security verification" in status.error for status in baidu_statuses))
-        self.assertEqual(result.diagnostics["successful_queries"], 8)
+        self.assertEqual(result.diagnostics["successful_queries"], 10)
 
     def test_collection_deduplicates_overlapping_queries(self):
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: provider_fixture(url, rss(item("ICBC Cambodia signs agreement"))))
         self.assertTrue(result.complete)
         self.assertEqual(len(result.articles), 1)
-        self.assertEqual(result.diagnostics["on_date_items_before_dedup"], 8)
+        self.assertEqual(result.diagnostics["on_date_items_before_dedup"], 10)
 
     def test_today_and_naive_clock_cannot_generate_a_complete_digest(self):
         with self.assertRaises(ValueError):

@@ -19,6 +19,10 @@ on:
         description: 'Send a labelled test; keep normal daily delivery state separate'
         default: false
         type: boolean
+      metadata_only:
+        description: 'Check search indexes without fetching publisher article bodies'
+        default: false
+        type: boolean
       force:
         description: 'Explicitly resend even if already delivered'
         default: false
@@ -42,6 +46,7 @@ jobs:
       REPORT_DATE: ${{ inputs.report_date }}
       DRY_RUN: ${{ inputs.dry_run }}
       TEST_MESSAGE: ${{ inputs.test_message }}
+      METADATA_ONLY: ${{ inputs.metadata_only }}
       FORCE_SEND: ${{ inputs.force }}
     steps:
       - name: Check out monitor
@@ -78,6 +83,7 @@ jobs:
           if [[ -n "$REPORT_DATE" ]]; then args=(--date "$REPORT_DATE"); fi
           if [[ "$DRY_RUN" == 'true' ]]; then args+=(--dry-run); fi
           if [[ "$TEST_MESSAGE" == 'true' ]]; then args+=(--test-message); fi
+          if [[ "$METADATA_ONLY" == 'true' ]]; then args+=(--metadata-only); fi
           if [[ "$FORCE_SEND" == 'true' ]]; then args+=(--force); fi
           python -m news_monitor "${args[@]}"
 

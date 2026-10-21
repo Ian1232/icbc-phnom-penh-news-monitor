@@ -3,13 +3,14 @@
 Search feeds are indexes, not an exhaustive record of everything published online.
 The Google search window is deliberately wider than the reporting date; the final
 decision always uses the item's actual publication timestamp in Phnom Penh time.
-No article destination is fetched, and no external translation service is used.
+Exact branch-name searches retain candidates for bounded article-body checks.
+No external translation service is used.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -44,6 +45,9 @@ class Article:
     summary: str = ""
     query: str = ""
     publication_note: str = ""
+    relevance: str = "confirmed"
+    evidence: str = "title_or_summary"
+    review_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,7 @@ class CollectionResult:
     target_date: str
     articles: tuple[Article, ...]
     statuses: tuple[QueryStatus, ...]
+    body_checks: tuple[dict, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -82,6 +87,12 @@ class CollectionResult:
             "invalid_date_items": sum(status.invalid_date_count for status in self.statuses),
             "invalid_link_items": sum(status.invalid_link_count for status in self.statuses),
             "articles": len(self.articles),
+            "confirmed_articles": sum(article.relevance == "confirmed" for article in self.articles),
+            "candidate_articles": sum(article.relevance == "candidate" for article in self.articles),
+            "body_check_count": len(self.body_checks),
+            "body_confirmed_count": sum(check["outcome"] == "confirmed" for check in self.body_checks),
+            "body_unverified_count": sum(check["outcome"] == "unverified" for check in self.body_checks),
+            "body_excluded_count": sum(check["outcome"] == "unrelated" for check in self.body_checks),
         }
 
 
@@ -90,6 +101,7 @@ class FeedQuery:
     name: str
     url: str
     provider: str
+    exact_branch: bool = False
 
 
 class _PlainText(HTMLParser):
@@ -228,14 +240,25 @@ def build_queries(target_date: date) -> tuple[FeedQuery, ...]:
         FeedQuery(name, "https://news.google.com/rss/search?" + urlencode({"q": f"{term} {bounds}", "hl": hl, "gl": gl, "ceid": ceid}), "google")
         for name, term, hl, gl, ceid in specs
     ]
+    # Search indexes can match a branch name in article text even when neither
+    # headline nor RSS description contains it. Preserve these as candidates;
+    # the query itself is provenance, never proof of article-body relevance.
+    for name, term, hl, gl, ceid in (
+        ("google-zh-exact-branch", '"工商银行金边分行"', "zh-CN", "CN", "CN:zh-Hans"),
+        ("google-en-exact-branch", '"ICBC" "Phnom Penh Branch"', "en-US", "US", "US:en"),
+    ):
+        queries.append(FeedQuery(name, "https://news.google.com/rss/search?" + urlencode({
+            "q": f"{term} {bounds}", "hl": hl, "gl": gl, "ceid": ceid,
+        }), "google", exact_branch=True))
     # Bing's index provides an independent path. Date filtering still uses pubDate;
     # its undocumented search-date syntax is deliberately not relied upon.
     for name, term in (
         ("bing-en-broad", '"ICBC" Cambodia'),
-        ("bing-en-branch", '"ICBC" "Phnom Penh"'),
-        ("bing-zh-branch", '工商银行 金边'),
+        ("bing-en-branch", '"ICBC" "Phnom Penh Branch"'),
+        ("bing-zh-branch", '"工商银行金边分行"'),
     ):
-        queries.append(FeedQuery(name, "https://www.bing.com/news/search?" + urlencode({"q": term, "format": "rss", "setlang": "en-US"}), "bing"))
+        queries.append(FeedQuery(name, "https://www.bing.com/news/search?" + urlencode({
+            "q": term, "format": "rss", "setlang": "en-US"}), "bing", exact_branch=name != "bing-en-broad"))
     # Baidu's public news results expose publication labels in the result cards.
     # Never substitute search/crawl time for the article's publication time.
     for name, term in (
@@ -246,7 +269,7 @@ def build_queries(target_date: date) -> tuple[FeedQuery, ...]:
     ):
         queries.append(FeedQuery(name, "https://www.baidu.com/s?" + urlencode({
             "tn": "news", "rtt": "4", "bsst": "1", "cl": "2", "ie": "utf-8", "wd": term,
-        }), "baidu"))
+        }), "baidu", exact_branch=name == "baidu-zh-full-name"))
     return tuple(queries)
 
 
@@ -324,7 +347,8 @@ def parse_google_news_rss(data: bytes, query: FeedQuery, target_date: date) -> t
         summary = description if query.provider == "bing" and description_links <= 1 else ""
         if _normalize(summary) in {_normalize(title), _normalize(title + source)}:
             summary = ""
-        if not is_relevant(title, summary):
+        metadata_match = is_relevant(title, summary)
+        if not metadata_match and not query.exact_branch:
             continue
         relevant_count += 1
         published = _parse_publication(item.findtext("pubDate", "") or item.findtext("{http://purl.org/dc/elements/1.1/}date", ""))
@@ -337,7 +361,10 @@ def parse_google_news_rss(data: bytes, query: FeedQuery, target_date: date) -> t
         if not url:
             invalid_link_count += 1
             continue
-        articles.append(Article(title, url, source or urlsplit(url).hostname or "Unknown source", published.isoformat(), summary[:1600], query.name))
+        articles.append(Article(title, url, source or urlsplit(url).hostname or "Unknown source", published.isoformat(),
+                                summary[:1600], query.name, relevance="confirmed" if metadata_match else "candidate",
+                                evidence="title_or_summary" if metadata_match else "exact_branch_query",
+                                review_reason="" if metadata_match else "精确分行名称检索命中，正文尚未核验"))
     errors = []
     if invalid_date_count:
         errors.append(f"{invalid_date_count} relevant item(s) have no usable publication timestamp")
@@ -361,7 +388,8 @@ def deduplicate_articles(articles: list[Article]) -> tuple[Article, ...]:
     kept: list[Article] = []
     urls: set[str] = set()
     titles: set[str] = set()
-    for article in sorted(articles, key=lambda a: (a.published_at, a.title, a.url)):
+    # Prefer stronger evidence before selecting a duplicate, regardless of time.
+    for article in sorted(articles, key=lambda a: (a.relevance != "confirmed", a.published_at, a.title, a.url)):
         url_key, title_key = _url_key(article.url), _normalize(article.title)
         if url_key in urls or title_key in titles:
             continue
@@ -385,7 +413,41 @@ def deduplicate_articles(articles: list[Article]) -> tuple[Article, ...]:
         titles.add(title_key)
         if not near_duplicate:
             kept.append(article)
-    return tuple(kept)
+    return tuple(sorted(kept, key=lambda a: (a.published_at, a.title, a.url)))
+
+
+def verify_body_candidates(articles, *, inspector=None, limit=10):
+    """Keep inaccessible exact-query matches visible without calling them confirmed."""
+    if inspector is None:
+        from .article_content import inspect_article
+        inspector = inspect_article
+    kept, checks = [], []
+    attempts = 0
+    for article in articles:
+        if article.relevance != "candidate":
+            kept.append(article)
+            continue
+        if attempts >= limit:
+            kept.append(replace(article, review_reason="精确分行名称检索命中；本次正文核验额度已用完"))
+            checks.append({"url": article.url, "query": article.query, "outcome": "unverified", "error": "Body check limit reached"})
+            continue
+        attempts += 1
+        try:
+            result = inspector(article.url)
+        except Exception:
+            result = None
+        if result is not None and result.verified:
+            outcome = "confirmed" if result.matched else "unrelated"
+            checks.append({"url": article.url, "query": article.query, "outcome": outcome, "error": ""})
+            if result.matched:
+                kept.append(replace(article, relevance="confirmed", evidence="article_body", review_reason="",
+                                    summary=result.body_excerpt or article.summary,
+                                    url=result.resolved_url or article.url))
+        else:
+            checks.append({"url": article.url, "query": article.query, "outcome": "unverified",
+                           "error": result.error if result is not None else "Body check failed"})
+            kept.append(replace(article, review_reason="精确分行名称检索命中；正文未能核验，关联性待确认"))
+    return deduplicate_articles(kept), tuple(checks)
 
 
 def _error_text(exc: Exception) -> str:
@@ -403,7 +465,8 @@ def _error_text(exc: Exception) -> str:
     return f"Feed collection failed ({type(exc).__name__})"
 
 
-def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable[[str], bytes] | None = None) -> CollectionResult:
+def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable[[str], bytes] | None = None,
+            body_inspector=None) -> CollectionResult:
     """Collect the requested completed Phnom Penh calendar day.
 
     ``fetcher`` exists for deterministic fixture testing and must return RSS bytes.
@@ -448,4 +511,5 @@ def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable
             found, status = future.result()
             articles.extend(found)
             statuses[status.name] = status
-    return CollectionResult(target_date.isoformat(), deduplicate_articles(articles), tuple(statuses[query.name] for query in queries))
+    articles, checks = verify_body_candidates(deduplicate_articles(articles), inspector=body_inspector)
+    return CollectionResult(target_date.isoformat(), articles, tuple(statuses[query.name] for query in queries), checks)

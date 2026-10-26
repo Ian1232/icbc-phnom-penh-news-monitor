@@ -31,11 +31,8 @@ def rss(*items):
     return ("<?xml version='1.0' encoding='utf-8'?><rss version='2.0'><channel><title>Fixture</title>" + "".join(items) + "</channel></rss>").encode()
 
 
-BAIDU_EMPTY = '<html><head><title>百度资讯搜索</title></head><body><div id="noresult">抱歉，没有找到相关结果</div></body></html>'.encode()
-
-
 def provider_fixture(url, rss_data=None):
-    return BAIDU_EMPTY if urlsplit(url).hostname == "www.baidu.com" else (rss_data if rss_data is not None else rss())
+    return rss_data if rss_data is not None else rss()
 
 
 class CollectorTests(unittest.TestCase):
@@ -148,7 +145,7 @@ class CollectorTests(unittest.TestCase):
 
     def test_search_window_is_padded_and_multilingual(self):
         queries = build_queries(DAY)
-        self.assertGreaterEqual(len(queries), 6)
+        self.assertEqual(len(queries), 10)
         for query in queries:
             _validate_feed_url(query.url)
             if query.provider == "google":
@@ -156,7 +153,9 @@ class CollectorTests(unittest.TestCase):
                 self.assertIn("after:2026-10-18", term)
                 self.assertIn("before:2026-10-21", term)
         self.assertTrue(any("zh-CN" in query.url for query in queries))
-        self.assertEqual(sum(query.provider == "baidu" for query in queries), 4)
+        self.assertEqual(sum(query.provider == "google" for query in queries), 7)
+        self.assertEqual(sum(query.provider == "bing" for query in queries), 3)
+        self.assertEqual(sum(query.provider == "baidu" for query in queries), 0)
 
     def test_valid_empty_feed_is_different_from_failed_source(self):
         fixtures = {
@@ -164,11 +163,11 @@ class CollectorTests(unittest.TestCase):
             "bing": b"<html>temporary block</html>",
         }
         def fetch(url):
-            return BAIDU_EMPTY if "baidu.com" in url else fixtures["google" if "google.com" in url else "bing"]
+            return fixtures["google" if "google.com" in url else "bing"]
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=fetch)
         self.assertFalse(result.complete)
         self.assertEqual(result.articles, ())
-        self.assertEqual(result.diagnostics["successful_queries"], 11)
+        self.assertEqual(result.diagnostics["successful_queries"], 7)
         self.assertEqual(result.diagnostics["failed_queries"], 3)
         self.assertTrue(all(status.ok for status in result.statuses[:5]))
         self.assertIn("not an RSS", next(status.error for status in result.statuses if status.name == "bing-en-broad"))
@@ -179,20 +178,18 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result.articles, ())
         self.assertEqual(result.diagnostics["raw_items"], 0)
 
-    def test_baidu_verification_stops_remaining_requests_and_is_not_zero_news(self):
-        baidu_requests = []
+    def test_cancelled_baidu_is_never_requested_or_reported_as_failed(self):
+        requests = []
         def fetch(url):
-            if urlsplit(url).hostname == "www.baidu.com":
-                baidu_requests.append(url)
-                return '<html><title>百度安全验证</title><body>请完成验证</body></html>'.encode()
+            requests.append(url)
+            self.assertNotIn("baidu.com", urlsplit(url).hostname)
             return rss()
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=fetch)
-        self.assertFalse(result.complete)
-        self.assertEqual(len(baidu_requests), 1)
-        baidu_statuses = [status for status in result.statuses if status.name.startswith("baidu-")]
-        self.assertEqual(len(baidu_statuses), 4)
-        self.assertTrue(all(not status.ok and "security verification" in status.error for status in baidu_statuses))
+        self.assertTrue(result.complete)
+        self.assertEqual(len(requests), 10)
+        self.assertTrue(all(not status.name.startswith("baidu-") for status in result.statuses))
         self.assertEqual(result.diagnostics["successful_queries"], 10)
+        self.assertEqual(result.diagnostics["failed_queries"], 0)
 
     def test_collection_deduplicates_overlapping_queries(self):
         result = collect(DAY, now=datetime(2026, 10, 20, tzinfo=timezone.utc), fetcher=lambda url: provider_fixture(url, rss(item("ICBC Cambodia signs agreement"))))
@@ -213,6 +210,7 @@ class CollectorTests(unittest.TestCase):
             "https://news.google.com:444/rss/search?q=ICBC",
             "https://news.google.com/other",
             "https://user:secret@news.google.com/rss/search?q=ICBC",
+            "https://www.baidu.com/s?tn=news&wd=ICBC",
             "https://www.baidu.com/s?tn=web&wd=ICBC",
             "https://www.baidu.com/link?url=ICBC",
             "https://wappass.baidu.com/static/captcha/tuxing.html",

@@ -49,12 +49,11 @@ def render(result, *, test=False, complete=None):
     count = len(confirmed)
     prefix = "【测试】" if test else ""
     lines = [f"{prefix}工行金边分行｜每日新闻汇总", f"新闻日期：{result.target_date}（金边时间）",
-             "检索渠道：Google News、Bing News、百度资讯",
+             "检索渠道：Google News、Bing News",
              f"监测范围：分行名称及 ICBC Cambodia 等中英文、柬文别名"]
     if not healthy:
         lines += ["⚠️ 部分新闻源采集失败，以下结果可能不完整。"]
-        failed = sorted({("百度资讯" if s.name.startswith("baidu-") else
-                          "Google News" if s.name.startswith("google-") else
+        failed = sorted({("Google News" if s.name.startswith("google-") else
                           "Bing News" if s.name.startswith("bing-") else "其他来源")
                          for s in result.statuses if not s.ok})
         lines += ["未完成采集：" + "、".join(failed)]
@@ -90,7 +89,7 @@ def write_run_summary(result, *, delivery=None, dry_run=False):
              f"检索状态：{coverage}（{healthy}/{total} 路检索完成）",
              f"已确认关联：{sum(a.relevance == 'confirmed' for a in result.articles)} 条；"
              f"待核实：{sum(a.relevance == 'candidate' for a in result.articles)} 条。"]
-    for provider, label in (("google", "Google News"), ("bing", "Bing News"), ("baidu", "百度资讯")):
+    for provider, label in (("google", "Google News"), ("bing", "Bing News")):
         queries = [status for status in result.statuses if status.name.startswith(provider + "-")]
         if queries:
             lines.append(f"- {label}：{sum(status.ok for status in queries)}/{len(queries)} 路检索完成")

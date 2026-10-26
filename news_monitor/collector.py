@@ -17,7 +17,6 @@ from html import unescape
 from html.parser import HTMLParser
 import re
 import socket
-import threading
 import time
 import unicodedata
 from typing import Callable
@@ -31,9 +30,8 @@ MAX_FEED_BYTES = 2 * 1024 * 1024
 MAX_WORKERS = 6
 FETCH_TIMEOUT_SECONDS = 25
 FETCH_ATTEMPTS = 3
-ALLOWED_FEED_HOSTS = frozenset({"news.google.com", "www.bing.com", "www.baidu.com"})
+ALLOWED_FEED_HOSTS = frozenset({"news.google.com", "www.bing.com"})
 USER_AGENT = "ICBCPhnomPenhNewsMonitor/1.0 (public RSS; daily digest)"
-BAIDU_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
 @dataclass(frozen=True)
@@ -180,32 +178,23 @@ def _validate_feed_url(url: str) -> None:
         or parsed.port not in {None, 443}
         or (parsed.hostname == "news.google.com" and parsed.path != "/rss/search")
         or (parsed.hostname == "www.bing.com" and parsed.path != "/news/search")
-        or (parsed.hostname == "www.baidu.com" and
-            (parsed.path != "/s" or dict(parse_qsl(parsed.query)).get("tn") != "news"))
     ):
         raise ValueError("Feed URL is outside the approved HTTPS news searches")
 
 
 class _FeedRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlsplit(newurl).hostname in {"wappass.baidu.com", "passport.baidu.com"}:
-            raise ValueError("Baidu returned a security verification page")
         _validate_feed_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def fetch_feed(url: str) -> bytes:
-    """Fetch approved RSS/HTML news searches, retaining normal TLS verification."""
+    """Fetch approved RSS news searches, retaining normal TLS verification."""
     _validate_feed_url(url)
     opener = build_opener(_FeedRedirects())
     for attempt in range(FETCH_ATTEMPTS):
         try:
-            baidu = urlsplit(url).hostname == "www.baidu.com"
             headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml;q=0.9"}
-            if baidu:
-                headers = {"User-Agent": BAIDU_USER_AGENT,
-                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                           "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7"}
             request = Request(url, headers=headers)
             with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
                 _validate_feed_url(response.geturl())
@@ -259,17 +248,6 @@ def build_queries(target_date: date) -> tuple[FeedQuery, ...]:
     ):
         queries.append(FeedQuery(name, "https://www.bing.com/news/search?" + urlencode({
             "q": term, "format": "rss", "setlang": "en-US"}), "bing", exact_branch=name != "bing-en-broad"))
-    # Baidu's public news results expose publication labels in the result cards.
-    # Never substitute search/crawl time for the article's publication time.
-    for name, term in (
-        ("baidu-zh-branch", '工商银行 金边'),
-        ("baidu-zh-cambodia", '工行 柬埔寨'),
-        ("baidu-zh-full-name", '"工商银行金边分行"'),
-        ("baidu-en-branch", '"ICBC" "Phnom Penh"'),
-    ):
-        queries.append(FeedQuery(name, "https://www.baidu.com/s?" + urlencode({
-            "tn": "news", "rtt": "4", "bsst": "1", "cl": "2", "ie": "utf-8", "wd": term,
-        }), "baidu", exact_branch=name == "baidu-zh-full-name"))
     return tuple(queries)
 
 
@@ -481,24 +459,9 @@ def collect(target_date: date, *, now: datetime | None = None, fetcher: Callable
         raise ValueError("Only completed Phnom Penh calendar days can be collected")
     queries = build_queries(target_date)
     fetch = fetcher or fetch_feed
-    baidu_gate = threading.BoundedSemaphore(1)
-    baidu_verification_required = False
 
     def run(query: FeedQuery) -> tuple[list[Article], QueryStatus]:
-        nonlocal baidu_verification_required
         try:
-            if query.provider == "baidu":
-                from .baidu import parse_baidu_news
-                # Keep the four daily Baidu requests sequential and low volume.
-                with baidu_gate:
-                    if baidu_verification_required:
-                        raise ValueError("Baidu security verification required; remaining queries skipped")
-                    try:
-                        return parse_baidu_news(fetch(query.url), query, target_date, observed_at=current)
-                    except ValueError as exc:
-                        if "security verification" in str(exc):
-                            baidu_verification_required = True
-                        raise
             return parse_google_news_rss(fetch(query.url), query, target_date)
         except Exception as exc:
             return [], QueryStatus(query.name, query.url, False, error=_error_text(exc))

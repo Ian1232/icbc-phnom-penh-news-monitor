@@ -60,22 +60,23 @@ class AppTests(unittest.TestCase):
         self.assertIn("部分新闻源采集失败", rendered)
         self.assertIn("不能据此认定当天没有新闻", rendered)
 
-    def test_baidu_failure_is_named_in_daily_report(self):
+    def test_active_channels_and_bing_failure_are_named_in_daily_report(self):
         result = CollectionResult(self.day.isoformat(), (), (
             QueryStatus("google-en-broad", "https://news.google.com/rss/search", True),
-            QueryStatus("baidu-zh-branch", "https://www.baidu.com/s?tn=news", False,
-                        error="Baidu security verification required"),
+            QueryStatus("bing-zh-branch", "https://www.bing.com/news/search", False,
+                        error="Feed connection failed"),
         ))
         rendered = app.render(result)
-        self.assertIn("检索渠道：Google News、Bing News、百度资讯", rendered)
-        self.assertIn("未完成采集：百度资讯", rendered)
+        self.assertIn("检索渠道：Google News、Bing News", rendered)
+        self.assertNotIn("百度", rendered)
+        self.assertIn("未完成采集：Bing News", rendered)
         self.assertIn("不能据此认定当天没有新闻", rendered)
 
-    def test_baidu_relative_time_is_displayed_as_source_label(self):
+    def test_publication_note_is_displayed_as_source_label(self):
         article = Article("工商银行金边分行签署协议", "https://example.com/a", "Example News",
-                          "2026-10-19T10:00:00+07:00", publication_note="百度标注：6小时前（相对时间）")
+                          "2026-10-19T10:00:00+07:00", publication_note="来源标注：6小时前（相对时间）")
         rendered = app.render(self.result(articles=[article]))
-        self.assertIn("发布时间：百度标注：6小时前（相对时间）", rendered)
+        self.assertIn("发布时间：来源标注：6小时前（相对时间）", rendered)
         self.assertNotIn("发布时间：10:00", rendered)
 
     def test_article_metadata_and_per_source_diagnostics_are_retained(self):
@@ -135,8 +136,8 @@ class AppTests(unittest.TestCase):
         result = CollectionResult(self.day.isoformat(), (), (
             QueryStatus("google-en-broad", "https://news.google.com/rss/search", True),
             QueryStatus("bing-en-broad", "https://www.bing.com/news/search", True),
-            QueryStatus("baidu-zh-branch", "https://www.baidu.com/s?tn=news", False,
-                        error="Baidu security verification required"),
+            QueryStatus("bing-zh-branch", "https://www.bing.com/news/search", False,
+                        error="Feed connection failed"),
         ))
         summary = Path(self.temp.name) / "github-summary.md"
         with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_ACTIONS": "true"}), patch.object(app, "collect", return_value=result), patch.object(app, "deliver", return_value={"sent_messages": 0, "skipped_messages": 2}), contextlib.redirect_stdout(io.StringIO()) as stdout:
@@ -144,7 +145,8 @@ class AppTests(unittest.TestCase):
         rendered = summary.read_text(encoding="utf-8")
         self.assertIn("部分检索不可用", rendered)
         self.assertIn("2/3 路检索完成", rendered)
-        self.assertIn("百度资讯：0/1", rendered)
+        self.assertIn("Bing News：1/2", rendered)
+        self.assertNotIn("百度", rendered)
         self.assertIn("本次发送 0 条", rendered)
         self.assertIn("已送达而跳过 2 条", rendered)
         self.assertIn("不能视为完整覆盖", rendered)
